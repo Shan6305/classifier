@@ -1,6 +1,9 @@
-use std::{fs, path::PathBuf};
+use std::{collections::VecDeque, fmt, fs, iter, path::PathBuf, str};
 
+use bimap::BiMap;
 use clap::{ArgEnum, Parser};
+use petgraph::stable_graph::StableDiGraph;
+use regex::Regex;
 
 #[derive(Debug, Clone)]
 pub struct Node {
@@ -8,8 +11,8 @@ pub struct Node {
 	pub kind: NodeKind,
 }
 
-impl std::fmt::Display for Node {
-	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for Node {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		match &self.kind {
 			NodeKind::Result(o) => write!(f, "Node {} | Output({})", self.id, o.value,),
 			NodeKind::Conditions { left, right } => {
@@ -78,8 +81,8 @@ enum ConditionDirection {
 	Left,
 	Right,
 }
-impl std::fmt::Display for ConditionDirection {
-	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for ConditionDirection {
+	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		write!(
 			f,
 			"{}",
@@ -92,24 +95,24 @@ impl std::fmt::Display for ConditionDirection {
 }
 
 struct DecisonTree {
-	graph: petgraph::stable_graph::StableDiGraph<Node, ConditionDirection, u32>,
-	map: bimap::BiMap<petgraph::graph::NodeIndex<u32>, u32>,
+	graph: StableDiGraph<Node, ConditionDirection, u32>,
+	map: BiMap<petgraph::graph::NodeIndex<u32>, u32>,
 }
 impl DecisonTree {
-	fn new(root: Node, nodes: std::collections::VecDeque<Node>) -> Self {
+	fn new(root: Node, nodes: VecDeque<Node>) -> Self {
 		let mut dt = Self {
-			graph: petgraph::stable_graph::StableDiGraph::new(),
-			map: bimap::BiMap::new(),
+			graph: StableDiGraph::new(),
+			map: BiMap::new(),
 		};
 
-		for n in std::iter::once(root.clone()).chain(nodes.clone()) {
+		for n in iter::once(root.clone()).chain(nodes.clone()) {
 			let node_id = n.id;
 			let node_index = dt.graph.add_node(n);
 
 			dt.map.insert(node_index, node_id);
 		}
 
-		for n in std::iter::once(root).chain(nodes) {
+		for n in iter::once(root).chain(nodes) {
 			let (l, r) = match n.kind {
 				NodeKind::Result(_) => continue,
 				NodeKind::Conditions { left, right } => (left, right),
@@ -156,18 +159,18 @@ struct Args {
 fn main() {
 	let args = Args::parse();
 
-	let file_data = std::fs::read(args.decision_tree).unwrap();
+	let file_data = fs::read(args.decision_tree).unwrap();
 
-	let decision_tree_text = std::str::from_utf8(&file_data).unwrap();
+	let decision_tree_text = str::from_utf8(&file_data).unwrap();
 
 	let lines = decision_tree_text.lines().collect::<Vec<&str>>();
 
 	let output_line_regex =
-		regex::Regex::new(r"^(?P<node_id>\d+) class = (?P<node_output>-?\d+)$").unwrap();
+		Regex::new(r"^(?P<node_id>\d+) class = (?P<node_output>-?\d+)$").unwrap();
 
 	// (?x) at the beginning enables comments, and ignores all whitespace
 	// Spaces are matched with ASCII hex code 0x20
-	let decision_line_regex = regex::Regex::new(
+	let decision_line_regex = Regex::new(
 		r"(?x)
 			^(?P<node_id> \d+) # match the node id
 
@@ -257,7 +260,7 @@ fn main() {
 				}
 			}
 		})
-		.collect::<std::collections::VecDeque<_>>();
+		.collect::<VecDeque<_>>();
 
 	let root = nodes.pop_front().unwrap();
 
