@@ -7,5 +7,6 @@ edition = "2021"
 
 [dependencies]
 bimap = "0.6.2"
+clap = { version = "3.2.8", features = ["derive"] }
 petgraph = "0.6.2"
 regex = "1.5.5"

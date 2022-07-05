@@ -1,3 +1,7 @@
+use std::{fs, path::PathBuf};
+
+use clap::{ArgEnum, Parser};
+
 #[derive(Debug, Clone)]
 pub struct Node {
 	pub id: u32,
@@ -7,12 +11,7 @@ pub struct Node {
 impl std::fmt::Display for Node {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 		match &self.kind {
-			NodeKind::Result(o) => write!(
-				f,
-				"Node {} | Output({})",
-				self.id,
-				o.value,
-			),
+			NodeKind::Result(o) => write!(f, "Node {} | Output({})", self.id, o.value,),
 			NodeKind::Conditions { left, right } => {
 				write!(
 					f,
@@ -130,13 +129,34 @@ impl DecisonTree {
 	}
 }
 
-fn main() {
-	let file_name = std::env::args()
-		.into_iter()
-		.nth(1)
-		.expect("Need to specify file which contains decision tree in textual format");
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ArgEnum)]
+enum OutputFormat {
+	GraphvizDot,
+	Verilog,
+}
 
-	let file_data = std::fs::read(file_name).unwrap();
+#[derive(Parser, Debug)]
+struct Args {
+	/// Path to a text file containing the decision tree in textual format.
+	#[clap(short = 'd')]
+	decision_tree: PathBuf,
+
+	/// What format the program should output its result as.
+	/// Graphviz Dot can be used for purposes of tree visualization and program testing,
+	/// and can be viewed online using a website such as http://viz-js.com.
+	#[clap(short = 'f', value_parser)]
+	output_format: OutputFormat,
+
+	/// If specified, the file that the program should write its output to.
+	/// If not specified, the program will print to stdout.
+	#[clap(short = 'l')]
+	output_location: Option<PathBuf>,
+}
+
+fn main() {
+	let args = Args::parse();
+
+	let file_data = std::fs::read(args.decision_tree).unwrap();
 
 	let decision_tree_text = std::str::from_utf8(&file_data).unwrap();
 
@@ -145,6 +165,8 @@ fn main() {
 	let output_line_regex =
 		regex::Regex::new(r"^(?P<node_id>\d+) class = (?P<node_output>-?\d+)$").unwrap();
 
+	// (?x) at the beginning enables comments, and ignores all whitespace
+	// Spaces are matched with ASCII hex code 0x20
 	let decision_line_regex = regex::Regex::new(
 		r"(?x)
 			^(?P<node_id> \d+) # match the node id
@@ -187,9 +209,6 @@ fn main() {
 	)
 	.unwrap();
 
-	// 	// Note: (?x) at the beginning enables comments, and ignores all whitespace
-	// 	// Spaces are matched with ASCII hex code 0x20
-
 	let mut nodes = lines
 		.into_iter()
 		.map(|l| {
@@ -198,7 +217,7 @@ fn main() {
 				Node {
 					id: caps["node_id"].parse().unwrap(),
 					kind: NodeKind::Result(Output {
-						value: caps["node_output"].parse().unwrap()
+						value: caps["node_output"].parse().unwrap(),
 					}),
 				}
 			} else {
@@ -241,11 +260,16 @@ fn main() {
 		.collect::<std::collections::VecDeque<_>>();
 
 	let root = nodes.pop_front().unwrap();
-	// let nodes: Vec<TextualNode> = nodes.into();
 
 	let dt = DecisonTree::new(root, nodes);
 
-	let x = petgraph::dot::Dot::new(&dt.graph);
+	let output = match args.output_format {
+		OutputFormat::GraphvizDot => petgraph::dot::Dot::new(&dt.graph).to_string(),
+		OutputFormat::Verilog => todo!(),
+	};
 
-	println!("{}", x);
+	match args.output_location {
+		None => println!("{}", output),
+		Some(p) => fs::write(p, output).expect("Unable to write output to file"),
+	}
 }
