@@ -80,7 +80,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "decision-tree"
+name = "classifier"
 version = "0.1.0"
 dependencies = [
  "bimap",
