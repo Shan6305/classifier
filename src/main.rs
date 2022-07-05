@@ -1,9 +1,11 @@
-use std::{collections::VecDeque, fmt, fs, iter, path::PathBuf, str};
+use std::{cmp::Ordering, collections::VecDeque, fmt, fs, iter, path::PathBuf, str};
 
 use bimap::BiMap;
 use clap::{ArgEnum, Parser};
-use petgraph::stable_graph::StableDiGraph;
+use petgraph::{graph::NodeIndex, stable_graph::StableDiGraph, Direction};
 use regex::Regex;
+
+mod ast;
 
 #[derive(Debug, Clone)]
 pub struct Node {
@@ -38,6 +40,14 @@ impl fmt::Display for Node {
 pub enum NodeKind {
 	Conditions { left: Condition, right: Condition },
 	Result(Output),
+}
+impl NodeKind {
+	fn as_conditions(&self) -> Option<(&Condition, &Condition)> {
+		match self {
+			Self::Conditions { left, right } => Some((left, right)),
+			Self::Result(_) => None,
+		}
+	}
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -263,16 +273,221 @@ fn main() {
 		.collect::<VecDeque<_>>();
 
 	let root = nodes.pop_front().unwrap();
+	let root_node_id = root.id;
 
-	let dt = DecisonTree::new(root, nodes);
+	let decision_tree = DecisonTree::new(root, nodes);
 
-	let output = match args.output_format {
-		OutputFormat::GraphvizDot => petgraph::dot::Dot::new(&dt.graph).to_string(),
-		OutputFormat::Verilog => todo!(),
-	};
-
-	match args.output_location {
+	let output = |output: &str| match args.output_location {
 		None => println!("{}", output),
 		Some(p) => fs::write(p, output).expect("Unable to write output to file"),
+	};
+
+	match args.output_format {
+		OutputFormat::GraphvizDot => {
+			let s = petgraph::dot::Dot::new(&decision_tree.graph).to_string();
+			output(&s);
+			return;
+		}
+		OutputFormat::Verilog => (),
+	}
+
+	let input_identifiers = decision_tree
+		.graph
+		.node_weights()
+		.filter_map(|n| match &n.kind {
+			NodeKind::Result(_) => None,
+			NodeKind::Conditions { left, right } => Some(
+				[
+					left.variable.identifier.clone(),
+					right.variable.identifier.clone(),
+				]
+				.into_iter(),
+			),
+		})
+		.flatten()
+		.map(|s| ast::Identifier::new(s))
+		.collect::<Vec<_>>();
+
+	let output_identifier = ast::Identifier::new("y");
+
+	let vth = decision_tree
+		.graph
+		.node_weights()
+		.filter_map(|n| match &n.kind {
+			NodeKind::Result(_) => None,
+			NodeKind::Conditions { left, right } => {
+				Some([left.comparison_operand, right.comparison_operand].into_iter())
+			}
+		})
+		.flatten()
+		.reduce(|accum, item| {
+			assert!(accum.partial_cmp(&item).unwrap() == Ordering::Equal);
+			accum
+		})
+		.unwrap()
+		.to_string();
+
+	let mut code = ast::Code {
+		includes: [
+			ast::Include {
+				name: "constants.vams".into(),
+			},
+			ast::Include {
+				name: "disciplines.vams".into(),
+			},
+		]
+		.into(),
+		module: ast::Module {
+			name: ast::Identifier::new("Classifier"),
+			inputs: input_identifiers.clone(),
+			output: output_identifier.clone(),
+			electrical_statement: ast::ElectricalStatement {
+				identifiers: input_identifiers
+					.iter()
+					.cloned()
+					.chain(iter::once(output_identifier))
+					.collect(),
+			},
+			parameter_real_statements: [ast::ParameterRealStatement {
+				identifier: ast::Identifier::new("vth"),
+				value: vth,
+			}]
+			.into(),
+			analog_block: ast::AnalogBlock { statement: None },
+		},
+	};
+
+	let mut nodes_list: Vec<Vec<u32>> = Vec::new();
+
+	nodes_list.push([root_node_id].into());
+
+	for _ in 0.. {
+		let mut new_node_ids = Vec::<u32>::new();
+		for node_id in nodes_list.last().unwrap().clone() {
+			let x = decision_tree
+				.graph
+				.neighbors(*decision_tree.map.get_by_right(&node_id).unwrap())
+				.map(|idx| *decision_tree.map.get_by_left(&idx).unwrap());
+
+			new_node_ids.extend(x);
+		}
+		if new_node_ids.len() == 0 {
+			break;
+		}
+		nodes_list.push(new_node_ids);
+	}
+
+	let nodes_list = nodes_list;
+
+	let root = decision_tree
+		.graph
+		.node_weight(*decision_tree.map.get_by_right(&nodes_list[0][0]).unwrap())
+		.unwrap()
+		.kind
+		.as_conditions()
+		.unwrap();
+
+	code.module.analog_block.statement = Some(Box::new(ast::Statement::IfElse(ast::IfElse {
+		if_condition: ast_condition_from_node_condition(root.0.clone()),
+		else_condition: ast_condition_from_node_condition(root.1.clone()),
+		if_then: None,
+		else_then: None,
+	})));
+
+	for i in 1..nodes_list.len() {
+		let nodes = nodes_list[i].clone();
+
+		for node in nodes {
+			let mut traversal_instructions = Vec::<ConditionDirection>::new();
+			let mut current_node = *decision_tree.map.get_by_right(&node).unwrap();
+
+			loop {
+				let x = decision_tree
+					.graph
+					.neighbors_directed(current_node, Direction::Incoming)
+					.collect::<Vec<_>>();
+
+				match x.len() {
+					0 => break,
+					1 => {}
+					_ => unreachable!(),
+				}
+
+				let previous_node = current_node;
+				current_node = x[0];
+
+				let edge_index = decision_tree
+					.graph
+					.find_edge(current_node, previous_node)
+					.unwrap();
+
+				let direction = *decision_tree.graph.edge_weight(edge_index).unwrap();
+				traversal_instructions.push(direction);
+			}
+
+			traversal_instructions.reverse();
+
+			let mut insertion_point = &mut code.module.analog_block.statement;
+
+			for i in traversal_instructions {
+				insertion_point = match i {
+					ConditionDirection::Left => {
+						&mut insertion_point
+							.as_mut()
+							.unwrap()
+							.as_if_else_mut()
+							.unwrap()
+							.if_then
+					}
+					ConditionDirection::Right => {
+						&mut insertion_point
+							.as_mut()
+							.unwrap()
+							.as_if_else_mut()
+							.unwrap()
+							.else_then
+					}
+				};
+			}
+
+			let _ = insertion_point.insert(Box::new(ast_statement_from_node(
+				decision_tree
+					.graph
+					.node_weight(*decision_tree.map.get_by_right(&node).unwrap())
+					.unwrap()
+					.clone(),
+				ast::Identifier::new("y"),
+			)));
+		}
+	}
+
+	output(&format!("{}", code));
+}
+
+fn ast_condition_from_node_condition(condition: Condition) -> ast::Condition {
+	ast::Condition {
+		input_identifier: ast::Identifier::new(condition.variable.identifier),
+		operator: match condition.comparison_operator {
+			ComparisonOperator::LessThan => ast::ComparisonOperator::LessThan,
+			ComparisonOperator::GreaterThan => ast::ComparisonOperator::GreaterThan,
+			ComparisonOperator::LessThanEq => ast::ComparisonOperator::LessThanEq,
+			ComparisonOperator::GreaterThanEq => ast::ComparisonOperator::GreaterThanEq,
+		},
+		comparison_operand: ast::Value::Identifier(ast::Identifier::new("vth")),
+	}
+}
+
+fn ast_statement_from_node(node: Node, variable: ast::Identifier) -> ast::Statement {
+	match node.kind {
+		NodeKind::Result(o) => ast::Statement::Assignment(ast::Assignment {
+			variable,
+			value: ast::Value::Number(o.value.into()),
+		}),
+		NodeKind::Conditions { left, right } => ast::Statement::IfElse(ast::IfElse {
+			if_condition: ast_condition_from_node_condition(left),
+			else_condition: ast_condition_from_node_condition(right),
+			if_then: None,
+			else_then: None,
+		}),
 	}
 }
