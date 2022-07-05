@@ -141,18 +141,18 @@ enum OutputFormat {
 #[derive(Parser, Debug)]
 struct Args {
 	/// Path to a text file containing the decision tree in textual format.
-	#[clap(short = 'd')]
+	#[clap(short = 'd', long = "decision-tree")]
 	decision_tree: PathBuf,
 
 	/// What format the program should output its result as.
 	/// Graphviz Dot can be used for purposes of tree visualization and program testing,
 	/// and can be viewed online using a website such as http://viz-js.com.
-	#[clap(short = 'f', value_parser)]
+	#[clap(short = 'f', long = "output-format", value_parser)]
 	output_format: OutputFormat,
 
 	/// If specified, the file that the program should write its output to.
 	/// If not specified, the program will print to stdout.
-	#[clap(short = 'l')]
+	#[clap(short = 'l', long = "output-location")]
 	output_location: Option<PathBuf>,
 }
 
